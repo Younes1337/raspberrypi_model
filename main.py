@@ -1,6 +1,5 @@
 import streamlit as st
 import cv2
-import dlib
 import numpy as np
 import time
 import plotly.graph_objects as go
@@ -11,6 +10,7 @@ import os
 import pywhatkit as kit
 import json
 import asyncio
+import RPi.GPIO as GPIO
 
 class DriverMonitoringApp:
     LEFT_EYE_IDX = [36, 37, 38, 39, 40, 41]
@@ -29,6 +29,7 @@ class DriverMonitoringApp:
         self.initialize_detection_systems()
         self.setup_state_variables()
         self.load_configurations()
+        self.setup_buzzer()
 
     def initialize_session_state(self):
         if 'start_monitoring' not in st.session_state:
@@ -79,8 +80,8 @@ class DriverMonitoringApp:
 
     def initialize_detection_systems(self):
         self.roboflow_client = InferenceHTTPClient(api_url="https://detect.roboflow.com", api_key="TOJjLSsaTb0Nk4Heiwnf")
-        self.detector = dlib.get_frontal_face_detector()
-        self.predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
+        # self.detector = dlib.get_frontal_face_detector()
+        # self.predictor = dlib.shape_predictor("shape_predictor_68_face_landmarks.dat")
         self.ear_values = deque(maxlen=50)
         self.mar_values = deque(maxlen=50)
         self.timestamps = deque(maxlen=50)
@@ -107,6 +108,18 @@ class DriverMonitoringApp:
         for key, value in initial_state.items():
             if key not in st.session_state:
                 st.session_state[key] = value
+
+    def setup_buzzer(self):
+        GPIO.setmode(GPIO.BCM)
+        self.buzzer_pin = 17
+        GPIO.setup(self.buzzer_pin, GPIO.OUT)
+
+    def activate_buzzer(self):
+        for _ in range(10):
+            GPIO.output(self.buzzer_pin, GPIO.HIGH)  # Turn the buzzer ON
+            time.sleep(0.5)  # Wait for 0.5 seconds
+            GPIO.output(self.buzzer_pin, GPIO.LOW)   # Turn the buzzer OFF
+            time.sleep(0.5)  # Wait for 0.5 seconds
 
     def get_eye_aspect_ratio(self, eye):
         A, B, C = np.linalg.norm(eye[1] - eye[5]), np.linalg.norm(eye[2] - eye[4]), np.linalg.norm(eye[0] - eye[3])
@@ -236,13 +249,13 @@ class DriverMonitoringApp:
 
     def process_frame(self, frame):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = self.detector(gray)
+        # faces = self.detector(gray)
         ear, mar, driver_state, alert_message = 0.0, 0.0, "Normal", ""
         phone_detected, class_name, confidence = self.detect_phone(frame)
         st.session_state["class"] = class_name
         st.session_state["confidence"] = confidence
         
-        if not phone_detected and ear < self.ear_threshold:
+        if not phone_detected:
             if self.drowsy_start_time is None:
                 self.drowsy_start_time = time.time()
             elif time.time() - self.drowsy_start_time >= self.drowsy_time_threshold:
@@ -250,6 +263,7 @@ class DriverMonitoringApp:
                 alert_message = "⚠️ Drowsiness Detected"
                 st.session_state["class_counts"]["SleepyDriving"] += 1
                 asyncio.run(self.check_and_send_alert())
+                self.activate_buzzer()
         else:
             self.drowsy_start_time = None
             st.session_state.alert_sent = False
@@ -259,18 +273,21 @@ class DriverMonitoringApp:
                 else:
                     driver_state, alert_message = "Distracted", f"⚠️ {class_name} Detected ({confidence:.2f}%)"
         
-        for face in faces:
-            landmarks = self.predictor(gray, face)
-            left_eye = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.LEFT_EYE_IDX])
-            right_eye = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.RIGHT_EYE_IDX])
-            mouth = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.MOUTH_IDX])
-            ear = (self.get_eye_aspect_ratio(left_eye) + self.get_eye_aspect_ratio(right_eye)) / 2.0
-            mar = self.get_mouth_aspect_ratio(mouth)
-            self.ear_values.append(ear)
-            self.mar_values.append(mar)
-            self.timestamps.append(time.time())
-            if ear < self.ear_threshold:  # Blink detected
-                self.blink_timestamps.append(time.time())
+        if st.session_state["class_counts"]["DangerousDriving"] >= 50:
+            self.activate_buzzer()
+        
+        # for face in faces:
+        #     landmarks = self.predictor(gray, face)
+        #     left_eye = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.LEFT_EYE_IDX])
+        #     right_eye = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.RIGHT_EYE_IDX])
+        #     mouth = np.array([(landmarks.part(n).x, landmarks.part(n).y) for n in self.MOUTH_IDX])
+        #     ear = (self.get_eye_aspect_ratio(left_eye) + self.get_eye_aspect_ratio(right_eye)) / 2.0
+        #     mar = self.get_mouth_aspect_ratio(mouth)
+        #     self.ear_values.append(ear)
+        #     self.mar_values.append(mar)
+        #     self.timestamps.append(time.time())
+        #     if ear < self.ear_threshold:  # Blink detected
+        #         self.blink_timestamps.append(time.time())
         return frame, ear, mar, driver_state, alert_message
 
     def toggle_monitoring(self):
@@ -326,6 +343,7 @@ class DriverMonitoringApp:
                 time.sleep(0.1)
         finally:
             cap.release()
+            GPIO.cleanup()  # Clean up GPIO on exit
 
 if __name__ == "__main__":
     app = DriverMonitoringApp()
